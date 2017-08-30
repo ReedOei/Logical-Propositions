@@ -75,7 +75,7 @@ instance Show Prop where
 
 instance Show Operator where
     show And = "&"
-    show Or = "V"
+    show Or = "|"
     show Implies = "->"
     show Iff = "<->"
 
@@ -104,6 +104,9 @@ getOp Iff = (<->)
 getPropOp :: PropOperator -> (Prop -> Bool)
 getPropOp Necessary = necessary
 getPropOp Possible = possible
+
+isEquiv :: Prop -> Prop -> Bool
+isEquiv a b = sort (truthTable a) == sort (truthTable b)
 
 evalWith :: Prop -> Map.Map String Bool -> Maybe Bool
 evalWith (Statement s) vals = Map.lookup s vals
@@ -225,7 +228,8 @@ main = do
 
                 mapM_ putStrLn outTable
 
-                print $ sort (truthTable a) == sort (truthTable b)
+                print $ isEquiv a b
+
             prop -> mapM_ putStrLn $ showTable prop
         main
 
