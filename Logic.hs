@@ -1,9 +1,16 @@
-import Lib (combinationElements)
-
 import Data.List
 import qualified Data.Map as Map
 import Data.Maybe
 import Data.Tree
+import Data.String.Utils (splitWs)
+
+import Text.ParserCombinators.Parsec
+
+purgeWhitespace = intercalate "" . splitWs
+
+combinationElements :: [[a]] -> [[a]]
+combinationElements (x:[]) = [[i] | i <- x]
+combinationElements (x:xs) = [i : nc | i <- x, nc <- combinationElements xs]
 
 lpad :: Char -> Int -> String -> String
 lpad c l s
@@ -37,11 +44,14 @@ possible :: Prop -> Bool
 possible = or . getAllValues
 
 data Operator = And | Or | Implies | Iff
+    -- deriving Show
 data PropOperator = Necessary | Possible
+    -- deriving Show
 data Prop = Statement String | Neg Prop | Exp Prop Operator Prop | Modal PropOperator Prop
+    -- deriving Show
 data Argument = Argument [Prop] Prop
 
--- For easier writing of propositions
+-- For easier writing of propositions in ghci
 p = Statement "P"
 q = Statement "Q"
 r = Statement "R"
@@ -111,7 +121,7 @@ isValid (Argument givens conclusion) = and (getAllValues (foldl1 land givens `im
 
 getAllValues :: Prop -> [Bool]
 getAllValues prop = map fromJust $ filter isJust $ map (prop `evalWith`) mapVals
-    where mapVals = map (Map.fromList . zip props) vals 
+    where mapVals = map (Map.fromList . zip props) vals
           props = getProps prop
           vals = combinationElements (replicate (length props) [True,False])
 
@@ -128,6 +138,7 @@ getProps = nub . truthTable'
           truthTable' (Exp a _ b) = (truthTable' a) ++ (truthTable' b)
           truthTable' (Modal propOp prop) = truthTable' prop
 
+-- I'm sorry.
 showTable :: Prop -> IO ()
 showTable prop = mapM_ putStrLn $ (show prop : (intercalate " | " $ map (lpad ' ' 5) props) : (replicate (8 * length props + 8) '-') : lines)
     where lines = map (intercalate " | " . map (lpad ' ' 5 . show)) rows
@@ -187,35 +198,84 @@ isValidStatement :: String -> Bool
 isValidStatement str@(s:ss)
     | not $ isAlpha s = False
     | otherwise = all (\i -> not (i `elem` "!@#$%^&*()<->")) str
+{-
+data Operator = And | Or | Implies | Iff
+    -- deriving Show
+data PropOperator = Necessary | Possible
+    -- deriving Show
+data Prop = Statement String | Neg Prop | Exp Prop Operator Prop | Modal PropOperator Prop
+    -- deriving Show
+data Argument = Argument [Prop] Prop-}
+
+---------------------------------------------------------
+-- Parsing
+---------------------------------------------------------
+topLevelParser :: CharParser st Prop
+topLevelParser = try tryExpr <|> propParser
+    where tryExpr = do
+            first <- propParser
+            op <- opParser
+            second <- propParser
+            return $ Exp first op second
+
+propParser = try (Neg <$> negatedPropParser) <|>
+             try modalParser <|>
+             try expParser <|>
+             try (between (char '(') (char ')') propParser) <|>
+             Statement <$> statementParser
+
+statementParser = many1 letter
+
+expParser = do
+    char '('
+    first <- propParser
+    op <- opParser
+    second <- propParser
+    char ')'
+
+    return $ Exp first op second
+
+opParser = do
+    op <- choice [string "->", string "&", string "|", string "<->"]
+
+    return $ case op of
+        "->" -> Implies
+        "&" -> And
+        "|" -> Or
+        "<->" -> Iff
+
+modalParser = do
+    op <- propOpParser
+    prop <- propParser
+
+    return $ Modal op prop
+
+propOpParser = do
+    op <- choice [string "[]", string "<>"]
+    
+    return $ case op of
+        "[]" -> Necessary
+        "<>" -> Possible
+
+negatedPropParser = do
+    char '!'
+    propParser
 
 parseProp :: String -> Prop
-parseProp str = parseExp nothing groups
-    where groups = tokenize $ replace " " "" str
-          nothing = Statement "Nothing"
-          parseExp prev gs = case gs of
-                                ("!":x:xs) -> parseExp (Neg (parseProp x)) xs
-                                (a:"->":xs) -> Exp (parseProp a) Implies (parseExp nothing xs)
-                                ("->":xs) -> Exp prev Implies (parseExp nothing xs)
-                                (a:"&":xs) -> Exp (parseProp a) And (parseExp nothing xs)
-                                ("&":xs) -> Exp prev And (parseExp nothing xs)
-                                (a:"|":xs) -> Exp (parseProp a) Or (parseExp nothing xs)
-                                ("|":xs) -> Exp prev Or (parseExp nothing xs)
-                                (a:"<->":xs) -> Exp (parseProp a) Iff (parseExp nothing xs)
-                                ("<->":xs) -> Exp prev Iff (parseExp nothing xs)
-                                ("[]":xs) -> Modal Necessary (parseExp nothing xs)
-                                ("<>":xs) -> Modal Possible (parseExp nothing xs)
-                                (_:op:_) -> error ("Unknown operator: " ++ show op)
-                                (a:xs) -> let next = case isValidStatement a of
-                                                          True -> Statement a
-                                                          False -> case length a < length str of
-                                                                      True -> parseProp a
-                                                                      False -> error "Could not parse input."
-                                              in parseExp next xs
-                                [] -> prev
---                                _ -> error ("No match for for groups: " ++ show groups)
--- A test proof:
--- (((P<->Q)&((S|T)->Q))&((!P)|((!T)&R)))->(T->U)
-main = do
-    l <- getLine
-    showTable $ parseProp l
-    main
+parseProp str = 
+    case parse topLevelParser "Error: " str of
+        Left err -> error $ show err
+        Right prop -> prop
+
+-- A test prop that is true.
+-- (((P <-> Q) & ((S | T) -> Q)) & ((!P) | ((!T) & R))) -> (T -> U)
+main = do 
+    l <- getLine >>= (return . purgeWhitespace)
+
+    if length l == 0 then do
+        putStrLn "Please enter some text."
+        main
+    else do
+        showTable $ parseProp l
+        main
+
