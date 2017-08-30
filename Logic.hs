@@ -43,11 +43,14 @@ necessary = and . getAllValues
 possible :: Prop -> Bool
 possible = or . getAllValues
 
-data Operator = And | Or | Implies | Iff
+data Operator = And | Or | Implies | Iff | Equivalent
     -- deriving Show
 data PropOperator = Necessary | Possible
     -- deriving Show
-data Prop = Statement String | Neg Prop | Exp Prop Operator Prop | Modal PropOperator Prop
+data Prop = Statement String | 
+            Neg Prop | 
+            Exp Prop Operator Prop | 
+            Modal PropOperator Prop 
     -- deriving Show
 data Argument = Argument [Prop] Prop
 
@@ -116,9 +119,6 @@ evalWith (Exp a operator b) vals = case evalWith a vals of
 evalWith (Modal propOperator prop) _ = Just (propOp prop)
     where propOp = getPropOp propOperator
 
-isValid :: Argument -> Bool
-isValid (Argument givens conclusion) = and (getAllValues (foldl1 land givens `implies` conclusion))
-
 getAllValues :: Prop -> [Bool]
 getAllValues prop = map fromJust $ filter isJust $ map (prop `evalWith`) mapVals
     where mapVals = map (Map.fromList . zip props) vals
@@ -139,73 +139,12 @@ getProps = nub . truthTable'
           truthTable' (Modal propOp prop) = truthTable' prop
 
 -- I'm sorry.
-showTable :: Prop -> IO ()
-showTable prop = mapM_ putStrLn $ (show prop : (intercalate " | " $ map (lpad ' ' 5) props) : (replicate (8 * length props + 8) '-') : lines)
-    where lines = map (intercalate " | " . map (lpad ' ' 5 . show)) rows
+showTable :: Prop -> [String]
+showTable prop = intercalate " | " topLine : (replicate (3 * length topLine + sum (map length topLine) - 3) '-') : lines
+    where topLine = map (lpad ' ' 5) $ map (\v -> " " ++ v ++ " ") props ++ [show prop]
+          lines = map (\row -> intercalate " | " $ zipWith (\row top -> lpad ' ' (length top) $ show row) row topLine) rows
           props = getProps prop
           rows = truthTable prop
-
-opStrs = ["&", "!", "|", "->", "<->", "<>", "[]"]
-
-isAlpha :: Char -> Bool
-isAlpha c = (c `elem` ['A'..'Z']) || (c `elem` ['a'..'z'])
-
-findInfix :: Eq a => [a] -> [a] -> Maybe (Int, [a])
-findInfix search vs = findInfix' vs 0
-    where findInfix' [] _ = Nothing
-          findInfix' xs i
-            | search `isPrefixOf` xs = Just (i, search)
-            | otherwise = findInfix' (tail xs) (i + 1)
-
-safeMinimum :: Ord a => [a] -> Maybe a
-safeMinimum [] = Nothing
-safeMinimum xs = Just $ minimum xs
-
-tokenize :: String -> [String]
-tokenize s = filter (not . null) $ tokenize' s 0 0 0
-    where tokenize' [] groupPos _ i = case groupPos of
-                                            -- To make sure we don't miss the first character
-                                            0 -> getTokens s
-                                            _ -> getTokens $ drop (groupPos + 1) $ take i s
-          tokenize' (x:xs) groupPos depth i
-            | '(' == x = case depth of
-                                0 -> case groupPos of
-                                        -- To make sure we don't miss the first character
-                                        0 -> (getTokens $ drop groupPos $ take i s) ++ tokenize' xs i (depth + 1) (i + 1)
-                                        _ -> (getTokens $ drop (groupPos + 1) $ take i s) ++ tokenize' xs i (depth + 1) (i + 1)
-                                _ -> tokenize' xs groupPos (depth + 1) (i + 1)
-            | ')' == x && depth == 1 = (drop (groupPos + 1) $ take i s) : tokenize' xs i 0 (i + 1)
-            | ')' == x = tokenize' xs groupPos (depth - 1) (i + 1)
-            | otherwise = tokenize' xs groupPos depth (i + 1)
-          getTokens str
-            | not (null operator) && not (null identifier) = case length opRest > length alphaRest of
-                                                                True -> operator : getTokens opRest
-                                                                False -> identifier : getTokens alphaRest
-            | not (null operator) = operator : getTokens opRest
-            | not (null identifier) = identifier : getTokens alphaRest
-            | otherwise = []
-            where (identifier, alphaRest) = case findIndex (not . isAlpha) str of
-                                                Nothing -> (str, "")
-                                                Just i -> splitAt i str
-                  (operator, opRest) = case safeMinimum $ map fromJust $ filter isJust (map (`findInfix` str) opStrs) of
-                                        Nothing -> ("", str)
-                                        Just (i, op) -> splitAt (i + length op) str
-
-parseArgument :: [String] -> Argument
-parseArgument ls = Argument (map parseProp $ init $ init ls) (parseProp $ last ls)
-
-isValidStatement :: String -> Bool
-isValidStatement str@(s:ss)
-    | not $ isAlpha s = False
-    | otherwise = all (\i -> not (i `elem` "!@#$%^&*()<->")) str
-{-
-data Operator = And | Or | Implies | Iff
-    -- deriving Show
-data PropOperator = Necessary | Possible
-    -- deriving Show
-data Prop = Statement String | Neg Prop | Exp Prop Operator Prop | Modal PropOperator Prop
-    -- deriving Show
-data Argument = Argument [Prop] Prop-}
 
 ---------------------------------------------------------
 -- Parsing
@@ -236,13 +175,14 @@ expParser = do
     return $ Exp first op second
 
 opParser = do
-    op <- choice [string "->", string "&", string "|", string "<->"]
+    op <- choice [string "->", string "&", string "|", string "<->", string "="]
 
     return $ case op of
         "->" -> Implies
         "&" -> And
         "|" -> Or
         "<->" -> Iff
+        "=" -> Equivalent
 
 modalParser = do
     op <- propOpParser
@@ -276,6 +216,16 @@ main = do
         putStrLn "Please enter some text."
         main
     else do
-        showTable $ parseProp l
+        case parseProp l of
+            Exp a Equivalent b -> do
+                let aTable = showTable a
+                let bTable = showTable b
+                
+                let outTable = zipWith (\a b -> a ++ "    " ++ b) (showTable a) (showTable b)
+
+                mapM_ putStrLn outTable
+
+                print $ sort (truthTable a) == sort (truthTable b)
+            prop -> mapM_ putStrLn $ showTable prop
         main
 

@@ -7,7 +7,8 @@ The full list of supported operators is as follows:
 - `P|Q` - P or Q
 - `P<->Q` - P if and only if Q
 - `[]P` - It is necessary that P
-- `<>P` -> It is possible that P
+- `<>P` - It is possible that P
+- `P = Q` - P is equivalent to Q. This should only be used as the top level operator, as it will not function properly for anything else (nor would it really make sense for it to do so).
 
 As an example, typing:
 
