@@ -44,15 +44,14 @@ possible :: Prop -> Bool
 possible = or . getAllValues
 
 data Operator = And | Or | Implies | Iff | Equivalent
-    -- deriving Show
+    deriving Eq
 data PropOperator = Necessary | Possible
+    deriving Eq
+data Prop = Statement String |
+            Neg Prop |
+            Exp Prop Operator Prop |
+            Modal PropOperator Prop
     -- deriving Show
-data Prop = Statement String | 
-            Neg Prop | 
-            Exp Prop Operator Prop | 
-            Modal PropOperator Prop 
-    -- deriving Show
-data Argument = Argument [Prop] Prop
 
 -- For easier writing of propositions in ghci
 p = Statement "P"
@@ -66,6 +65,13 @@ w = Statement "W"
 x = Statement "X"
 y = Statement "Y"
 z = Statement "Z"
+
+instance Eq Prop where
+    Statement a == Statement b = a == b
+    Neg a == Neg b = a == b
+    Exp a1 op1 b1 == Exp a2 op2 b2 = (a1 == a2) && (op1 == op2) && (b1 == b2)
+    Modal op1 a1 == Modal op2 a2 = (op1 == op2) && (a1 == a2)
+    _ == _ = False
 
 instance Show Prop where
     show (Statement s) = s
@@ -82,11 +88,6 @@ instance Show Operator where
 instance Show PropOperator where
     show Necessary = "[]"
     show Possible = "<>"
-
-instance Show Argument where
-    show (Argument givens conclusion) = intercalate "\n" givenStrings ++ "\n" ++ (replicate longestGiven '-') ++ "\n" ++ show conclusion
-        where givenStrings = map show givens
-              longestGiven = maximum $ map length givenStrings
 
 land a b = Exp a And b
 a & b = Exp a And b
@@ -106,7 +107,11 @@ getPropOp Necessary = necessary
 getPropOp Possible = possible
 
 isEquiv :: Prop -> Prop -> Bool
-isEquiv a b = sort (truthTable a) == sort (truthTable b)
+isEquiv a b = all testVals mapVals
+    where testVals vs = (a `evalWith` vs) == (b `evalWith` vs)
+          mapVals = map (Map.fromList . zip props) vals
+          props = getProps a
+          vals = combinationElements (replicate (length props) [True,False])
 
 evalWith :: Prop -> Map.Map String Bool -> Maybe Bool
 evalWith (Statement s) vals = Map.lookup s vals
@@ -148,6 +153,57 @@ showTable prop = intercalate " | " topLine : (replicate (3 * length topLine + su
           lines = map (\row -> intercalate " | " $ zipWith (\row top -> lpad ' ' (length top) $ show row) row topLine) rows
           props = getProps prop
           rows = truthTable prop
+
+-- Takes two lists and returns a list containing all the elements from both.
+-- Which list the element is from will alternate.
+-- Ex: interleave [1..5] [6,7,8,9] == [1,6,2,7,3,8,4,9,5]
+interleave :: [a] -> [a] -> [a]
+interleave [] [] = []
+interleave a [] = a
+interleave [] b = b
+interleave (a:as) bs = a : interleave' as bs
+    where interleave' [] [] = []
+          interleave' a [] = a
+          interleave' [] b = b
+          interleave' a (b:bs) = b : interleave a bs
+
+-- Replaces the propositions inside the first prop one by one with the second prop
+-- Returns a list of all the new propositions
+replacements :: Prop -> Prop -> [Prop]
+replacements a@(Statement _) b = [a, b]
+replacements a@(Neg a1) b = [a, Neg b]
+replacements a@(Exp a1 op b1) b = [a, Exp b op b1, Exp a1 op b, Exp b op b]
+replacements a@(Modal op a1) b = [a, Modal op b]
+
+-- Replaces the propositions inside the first prop one by one with the second prop
+-- Will then recursively do the same to all sub propositions
+-- Returns a list of all the new propositions
+allReplacements a b = nub $ allReplacements' a b
+
+allReplacements' :: Prop -> Prop -> [Prop]
+allReplacements' a@(Statement _) b = replacements a b
+allReplacements' a@(Neg a1) b = replacements a b ++ map Neg (allReplacements a1 b)
+allReplacements' a@(Exp a1 op b1) b = replacements a b ++
+                                     concat (map (replacements a) (allReplacements a1 b)) ++
+                                     concat (map (replacements a) (allReplacements b1 b))
+allReplacements' a@(Modal op a1) b = replacements a b ++ map (Modal op) (allReplacements a1 b)
+
+-- Returns a list of (TODO: all) propositions that are logically equivalent
+-- to the input (but also aren't literally the same thing).
+findEquiv :: Prop -> [Prop]
+findEquiv prop = nub $ filter (\p -> prop /= p && isEquiv prop p) allProps
+    where statements = map Statement $ getProps prop
+          allProps = listAll statements
+          listAll xs = xs ++ new ++ listAll new
+            where new :: [Prop]
+                  new = concat $ map (\rep -> concat $ map (allReplacements rep) newBase) newBase
+                  newBase = concat (map makeProps xs)
+                  makeProps curProp = (Neg curProp) : applyOperators ++ applyModals
+                    where
+                      operators = [And, Or, Implies, Iff]
+                      modals = [Necessary, Possible]
+                      applyOperators = concat $ map (\op -> map (Exp curProp op) statements) operators
+                      applyModals = map (\m -> Modal m curProp) modals
 
 ---------------------------------------------------------
 -- Parsing
@@ -195,7 +251,7 @@ modalParser = do
 
 propOpParser = do
     op <- choice [string "[]", string "<>"]
-    
+
     return $ case op of
         "[]" -> Necessary
         "<>" -> Possible
@@ -205,17 +261,17 @@ negatedPropParser = do
     propParser
 
 parseProp :: String -> Prop
-parseProp str = 
-    case parse topLevelParser "Error: " str of
+parseProp str =
+    case parse topLevelParser "Error: " $ purgeWhitespace str of
         Left err -> error $ show err
         Right prop -> prop
 
 -- A test prop that is true.
 -- (((P <-> Q) & ((S | T) -> Q)) & ((!P) | ((!T) & R))) -> (T -> U)
-main = do 
-    l <- getLine >>= (return . purgeWhitespace)
+main = do
+    l <- getLine
 
-    if length l == 0 then do
+    if length (purgeWhitespace l) == 0 then do
         putStrLn "Please enter some text."
         main
     else do
@@ -223,7 +279,7 @@ main = do
             Exp a Equivalent b -> do
                 let aTable = showTable a
                 let bTable = showTable b
-                
+
                 let outTable = zipWith (\a b -> a ++ "    " ++ b) (showTable a) (showTable b)
 
                 mapM_ putStrLn outTable
