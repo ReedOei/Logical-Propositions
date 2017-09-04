@@ -9,6 +9,7 @@ The full list of supported operators is as follows:
 - `[]P` - It is necessary that P
 - `<>P` - It is possible that P
 - `P = Q` - P is equivalent to Q. This should only be used as the top level operator, as it will not function properly for anything else (nor would it really make sense for it to do so).
+- `P where Q` - This is also only a top level operation. It will display the truth table for P, but only the rows where Q is true.
 
 As an example, typing:
 
