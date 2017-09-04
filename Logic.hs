@@ -6,7 +6,7 @@ import Data.String.Utils (splitWs)
 
 import Text.ParserCombinators.Parsec
 
-purgeWhitespace = intercalate "" . splitWs
+purgeWhitespace = intercalate " " . splitWs
 
 combinationElements :: [[a]] -> [[a]]
 combinationElements (x:[]) = [[i] | i <- x]
@@ -38,10 +38,10 @@ False <-> True = False
 False <-> False = True
 
 necessary :: Prop -> Bool
-necessary = and . getAllValues
+necessary = and . map snd . getAllValues
 
 possible :: Prop -> Bool
-possible = or . getAllValues
+possible = or . map snd . getAllValues
 
 data Operator = And | Or | Implies | Iff | Equivalent
     deriving Eq
@@ -50,7 +50,8 @@ data PropOperator = Necessary | Possible
 data Prop = Statement String |
             Neg Prop |
             Exp Prop Operator Prop |
-            Modal PropOperator Prop
+            Modal PropOperator Prop |
+            Pred Prop Prop -- Only the rows where the second prop is true will be shown.
     -- deriving Show
 
 -- For easier writing of propositions in ghci
@@ -71,6 +72,7 @@ instance Eq Prop where
     Neg a == Neg b = a == b
     Exp a1 op1 b1 == Exp a2 op2 b2 = (a1 == a2) && (op1 == op2) && (b1 == b2)
     Modal op1 a1 == Modal op2 a2 = (op1 == op2) && (a1 == a2)
+    Pred a1 b1 == Pred a2 b2 = a1 == a2 && b1 == b2
     _ == _ = False
 
 instance Show Prop where
@@ -78,6 +80,7 @@ instance Show Prop where
     show (Neg a) = "!" ++ show a
     show (Exp a op b) = "(" ++ show a ++ show op ++ show b ++ ")"
     show (Modal pop a) = show pop ++ "(" ++ show a ++ ")"
+    show (Pred a b) = show a ++ " where " ++ show b
 
 instance Show Operator where
     show And = "&"
@@ -115,36 +118,34 @@ isEquiv a b = all testVals mapVals
 
 evalWith :: Prop -> Map.Map String Bool -> Maybe Bool
 evalWith (Statement s) vals = Map.lookup s vals
-evalWith (Neg prop) vals = case evalWith prop vals of
-                                Nothing -> Nothing
-                                Just v -> Just (not v)
-evalWith (Exp a operator b) vals = case evalWith a vals of
-                                    Nothing -> Nothing
-                                    Just aVal -> case evalWith b vals of
-                                                Nothing -> Nothing
-                                                Just bVal -> Just (aVal `op` bVal)
+evalWith (Neg prop) vals = not <$> (prop `evalWith` vals)
+evalWith (Exp a operator b) vals = op <$> (a `evalWith` vals) <*> (b `evalWith` vals)
     where op = getOp operator
 evalWith (Modal propOperator prop) _ = Just (propOp prop)
     where propOp = getPropOp propOperator
 
-getAllValues :: Prop -> [Bool]
-getAllValues prop = map fromJust $ filter isJust $ map (prop `evalWith`) mapVals
+getAllValues :: Prop -> [(Map.Map String Bool, Bool)]
+getAllValues prop = map (\vs -> (vs, prop `evalWith` vs == Just True)) mapVals
     where mapVals = map (Map.fromList . zip props) vals
           props = getProps prop
           vals = combinationElements (replicate (length props) [True,False])
 
 truthTable :: Prop -> [[Bool]]
-truthTable prop = zipWith (\vs res -> vs ++ [res]) vals resultVals
+truthTable (Pred a b) = map (\(vs, res) -> Map.elems vs ++ [res]) vals
+    where resultVals = getAllValues a
+          -- Only if the predicate is also true with these values do we want to show it.
+          vals = filter (\(vs, _) -> b `evalWith` vs == Just True) resultVals
+
+truthTable prop = map (\(vs, res) -> Map.elems vs ++ [res]) resultVals
     where resultVals = getAllValues prop
-          props = getProps prop
-          vals = combinationElements (replicate (length props) [True,False])
 
 getProps :: Prop -> [String]
-getProps = nub . truthTable'
-    where truthTable' (Statement s) = [s]
-          truthTable' (Neg a) = truthTable' a
-          truthTable' (Exp a _ b) = (truthTable' a) ++ (truthTable' b)
-          truthTable' (Modal propOp prop) = truthTable' prop
+getProps = nub . getProps'
+    where getProps' (Statement s) = [s]
+          getProps' (Neg a) = getProps' a
+          getProps' (Exp a _ b) = getProps' a ++ getProps' b
+          getProps' (Modal propOp prop) = getProps' prop
+          getProps' (Pred a b) = getProps' a ++ getProps' b
 
 -- I'm sorry.
 showTable :: Prop -> [String]
@@ -188,18 +189,30 @@ allReplacements' a@(Exp a1 op b1) b = replacements a b ++
                                      concat (map (replacements a) (allReplacements b1 b))
 allReplacements' a@(Modal op a1) b = replacements a b ++ map (Modal op) (allReplacements a1 b)
 
+-- Checks whether any of the expressions are of the form a `op` a.
+-- We don't want these, as they are generaly uninteresting.
+operandsEq :: Prop -> Bool
+operandsEq (Statement _) = False
+operandsEq (Neg a) = operandsEq a
+operandsEq (Exp a _ b) = a == b || operandsEq a || operandsEq b
+operandsEq (Modal _ a) = operandsEq a
+
 -- Returns a list of (TODO: all) propositions that are logically equivalent
 -- to the input (but also aren't literally the same thing).
 findEquiv :: Prop -> [Prop]
 findEquiv prop = nub $ filter (\p -> prop /= p && isEquiv prop p) allProps
     where statements = map Statement $ getProps prop
-          allProps = listAll statements
+          allProps = filter (not . operandsEq) $ listAll statements
           listAll xs = xs ++ new ++ listAll new
-            where new :: [Prop]
-                  new = concat $ map (\rep -> concat $ map (allReplacements rep) newBase) newBase
+            where new = concat $ map (\rep -> concat $ map (allReplacements rep) newBase) newBase
                   newBase = concat (map makeProps xs)
-                  makeProps curProp = (Neg curProp) : applyOperators ++ applyModals
+                  makeProps curProp = negated ++ applyOperators ++ applyModals
                     where
+                      -- Don't negate twice
+                      negated =
+                        case curProp of
+                            Neg _ -> []
+                            _ -> [Neg curProp]
                       operators = [And, Or, Implies, Iff]
                       modals = [Necessary, Possible]
                       applyOperators = concat $ map (\op -> map (Exp curProp op) statements) operators
@@ -209,11 +222,18 @@ findEquiv prop = nub $ filter (\p -> prop /= p && isEquiv prop p) allProps
 -- Parsing
 ---------------------------------------------------------
 topLevelParser :: CharParser st Prop
-topLevelParser = try tryExpr <|> propParser
+topLevelParser = try tryExpr <|>
+                 try predicate <|>
+                 propParser
     where tryExpr = do
+            spaces
             first <- propParser
+            spaces
             op <- opParser
+            spaces
             second <- propParser
+            spaces
+
             return $ Exp first op second
 
 propParser = try (Neg <$> negatedPropParser) <|>
@@ -225,15 +245,31 @@ propParser = try (Neg <$> negatedPropParser) <|>
 statementParser = many1 letter
 
 expParser = do
+    spaces
     char '('
+    spaces
     first <- propParser
+    spaces
     op <- opParser
+    spaces
     second <- propParser
+    spaces
     char ')'
 
     return $ Exp first op second
 
+predicate = do
+    spaces
+    first <- propParser
+    spaces
+    string "where"
+    spaces
+    second <- propParser
+
+    return $ Pred first second
+
 opParser = do
+    spaces
     op <- choice [string "->", string "&", string "|", string "<->", string "="]
 
     return $ case op of
@@ -244,12 +280,15 @@ opParser = do
         "=" -> Equivalent
 
 modalParser = do
+    spaces
     op <- propOpParser
+    spaces
     prop <- propParser
 
     return $ Modal op prop
 
 propOpParser = do
+    spaces
     op <- choice [string "[]", string "<>"]
 
     return $ case op of
@@ -257,7 +296,9 @@ propOpParser = do
         "<>" -> Possible
 
 negatedPropParser = do
+    spaces
     char '!'
+    spaces
     propParser
 
 parseProp :: String -> Prop
