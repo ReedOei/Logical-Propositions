@@ -1,8 +1,14 @@
 import Data.List
+import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Ord
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Maybe
 import Data.Tree
 import Data.String.Utils (splitWs)
+
+import System.Environment
 
 import Text.ParserCombinators.Parsec
 
@@ -38,23 +44,30 @@ False <-> True = False
 False <-> False = True
 
 necessary :: Prop -> Bool
-necessary = and . map snd . getAllValues
+necessary prop = and [ truthVal valuation prop | valuation <- valuations vs ]
+    where
+        vs = getProps prop
 
 possible :: Prop -> Bool
-possible = or . map snd . getAllValues
+possible prop = or [ truthVal valuation prop | valuation <- valuations vs ]
+    where
+        vs = getProps prop
 
 data Operator = And | Or | Implies | Iff | Equivalent
-    deriving Eq
+    deriving (Eq, Ord)
 data PropOperator = Necessary | Possible
-    deriving Eq
+    deriving (Eq, Ord)
 data Prop = Statement String |
             Neg Prop |
             Exp Prop Operator Prop |
             Modal PropOperator Prop |
             Pred Prop Prop -- Only the rows where the second prop is true will be shown.
-    -- deriving Show
+    deriving (Eq, Ord)
 
 -- For easier writing of propositions in ghci
+a = Statement "A"
+b = Statement "B"
+c = Statement "C"
 p = Statement "P"
 q = Statement "Q"
 r = Statement "R"
@@ -67,26 +80,18 @@ x = Statement "X"
 y = Statement "Y"
 z = Statement "Z"
 
-instance Eq Prop where
-    Statement a == Statement b = a == b
-    Neg a == Neg b = a == b
-    Exp a1 op1 b1 == Exp a2 op2 b2 = (a1 == a2) && (op1 == op2) && (b1 == b2)
-    Modal op1 a1 == Modal op2 a2 = (op1 == op2) && (a1 == a2)
-    Pred a1 b1 == Pred a2 b2 = a1 == a2 && b1 == b2
-    _ == _ = False
-
 instance Show Prop where
     show (Statement s) = s
-    show (Neg a) = "!" ++ show a
-    show (Exp a op b) = "(" ++ show a ++ show op ++ show b ++ ")"
+    show (Neg a) = "\\neg " ++ show a
+    show (Exp a op b) = "(" ++ show a ++ " " ++ show op ++ " " ++ show b ++ ")"
     show (Modal pop a) = show pop ++ "(" ++ show a ++ ")"
     show (Pred a b) = show a ++ " where " ++ show b
 
 instance Show Operator where
-    show And = "&"
-    show Or = "|"
-    show Implies = "->"
-    show Iff = "<->"
+    show And = "\\land"
+    show Or = "\\lor"
+    show Implies = "\\imp"
+    show Iff = "\\iff"
 
 instance Show PropOperator where
     show Necessary = "[]"
@@ -116,7 +121,7 @@ isEquiv a b = all testVals mapVals
           props = getProps a
           vals = combinationElements (replicate (length props) [True,False])
 
-evalWith :: Prop -> Map.Map String Bool -> Maybe Bool
+evalWith :: Prop -> Map String Bool -> Maybe Bool
 evalWith (Statement s) vals = Map.lookup s vals
 evalWith (Neg prop) vals = not <$> (prop `evalWith` vals)
 evalWith (Exp a operator b) vals = op <$> (a `evalWith` vals) <*> (b `evalWith` vals)
@@ -124,20 +129,41 @@ evalWith (Exp a operator b) vals = op <$> (a `evalWith` vals) <*> (b `evalWith` 
 evalWith (Modal propOperator prop) _ = Just (propOp prop)
     where propOp = getPropOp propOperator
 
-getAllValues :: Prop -> [(Map.Map String Bool, Bool)]
-getAllValues prop = map (\vs -> (vs, prop `evalWith` vs == Just True)) mapVals
-    where mapVals = map (Map.fromList . zip props) vals
-          props = getProps prop
-          vals = combinationElements (replicate (length props) [True,False])
+truthVal :: Map String Bool -> Prop -> Bool
+truthVal valuation prop = prop `evalWith` valuation == Just True
+
+-- TODO: Make a catamorphism thing for this?
+-- Can parameterize on the statement type or something, idk.
+subProps :: Prop -> Set Prop
+subProps s@(Statement _)    = Set.singleton s
+subProps n@(Neg p)          = Set.insert n $ subProps p
+subProps e@(Exp p1 op p2)   = Set.insert e $ Set.union (subProps p1) $ subProps p2
+subProps m@(Modal propOp p) = Set.insert m $ subProps p
+subProps w@(Pred p1 p2)     = Set.insert w $ Set.union (subProps p1) $ subProps p2
+
+height :: Prop -> Integer
+height s@(Statement _)    = 1
+height n@(Neg p)          = 1 + height p
+height e@(Exp p1 op p2)   = 1 + max (height p1) (height p2)
+height m@(Modal propOp p) = 1 + height p
+height w@(Pred p1 p2)     = 1 + max (height p1) (height p2)
+
+valuations :: [String] -> [Map String Bool]
+valuations vs = [Map.fromList $ zip vs valuation | valuation <- combinationElements $ replicate (length vs) [True, False]]
+
+propList :: Prop -> [Prop]
+propList = sortBy (comparing height) . Set.toList . subProps
 
 truthTable :: Prop -> [[Bool]]
-truthTable (Pred a b) = map (\(vs, res) -> Map.elems vs ++ [res]) vals
-    where resultVals = getAllValues a
-          -- Only if the predicate is also true with these values do we want to show it.
-          vals = filter (\(vs, _) -> b `evalWith` vs == Just True) resultVals
+truthTable (Pred a b) = [ map (truthVal valuation) props | valuation <- valuations vs, truthVal valuation b]
+    where
+        props = propList a
+        vs = getProps a ++ getProps b
 
-truthTable prop = map (\(vs, res) -> Map.elems vs ++ [res]) resultVals
-    where resultVals = getAllValues prop
+truthTable prop = [ map (truthVal valuation) props | valuation <- valuations vs]
+    where
+        props = propList prop
+        vs = getProps prop
 
 getProps :: Prop -> [String]
 getProps = nub . getProps'
@@ -150,10 +176,25 @@ getProps = nub . getProps'
 -- I'm sorry.
 showTable :: Prop -> [String]
 showTable prop = intercalate " | " topLine : (replicate (3 * length topLine + sum (map length topLine) - 3) '-') : lines
-    where topLine = map (lpad ' ' 5) $ map (\v -> " " ++ v ++ " ") props ++ [show prop]
+    where topLine = map (lpad ' ' 5) $ map (\p -> " " ++ show p ++ " ") props
           lines = map (\row -> intercalate " | " $ zipWith (\row top -> lpad ' ' (length top) $ show row) row topLine) rows
-          props = getProps prop
+          props = propList prop
           rows = truthTable prop
+
+showLatexTable :: Prop -> String
+showLatexTable prop =
+    "\\begin{tabular}{" ++ alignStr ++ "}\n" ++
+    intercalate " \\\\\n\\hline\n" (map (intercalate " & ") rows) ++ "\n" ++
+    "\\end{tabular}"
+    where
+        alignStr = intercalate "|" $ replicate (length props) "c"
+        props = propList prop
+        rowVals = truthTable prop
+        headerRow = map (\p -> "$" ++ show p ++ "$") props
+        rows = headerRow : map (map showBool) (truthTable prop)
+
+        showBool True = "\\true"
+        showBool False = "\\false"
 
 -- Takes two lists and returns a list containing all the elements from both.
 -- Which list the element is from will alternate.
@@ -310,6 +351,10 @@ parseProp str =
 -- A test prop that is true.
 -- (((P <-> Q) & ((S | T) -> Q)) & ((!P) | ((!T) & R))) -> (T -> U)
 main = do
+    args <- getArgs
+
+    let useLatex = if not (null args) then head args == "--latex" else False
+
     l <- getLine
 
     if length (purgeWhitespace l) == 0 then do
@@ -327,6 +372,10 @@ main = do
 
                 print $ isEquiv a b
 
-            prop -> mapM_ putStrLn $ showTable prop
+            prop ->
+                if useLatex then
+                    putStrLn $ showLatexTable prop
+                else
+                    mapM_ putStrLn $ showTable prop
         main
 
