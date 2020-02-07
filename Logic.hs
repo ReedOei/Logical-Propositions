@@ -58,6 +58,7 @@ data Operator = And | Or | Implies | Iff | Equivalent
 data PropOperator = Necessary | Possible
     deriving (Eq, Ord)
 data Prop = Statement String |
+            ConstTrue | ConstFalse |
             Neg Prop |
             Exp Prop Operator Prop |
             Modal PropOperator Prop |
@@ -81,6 +82,8 @@ y = Statement "Y"
 z = Statement "Z"
 
 instance Show Prop where
+    show ConstFalse = "\\false"
+    show ConstTrue = "\\true"
     show (Statement s) = s
     show (Neg a) = "\\neg " ++ show a
     show (Exp a op b) = "(" ++ show a ++ " " ++ show op ++ " " ++ show b ++ ")"
@@ -122,6 +125,8 @@ isEquiv a b = all testVals mapVals
           vals = combinationElements (replicate (length props) [True,False])
 
 evalWith :: Prop -> Map String Bool -> Maybe Bool
+evalWith ConstTrue _ = Just True
+evalWith ConstFalse _ = Just False
 evalWith (Statement s) vals = Map.lookup s vals
 evalWith (Neg prop) vals = not <$> (prop `evalWith` vals)
 evalWith (Exp a operator b) vals = op <$> (a `evalWith` vals) <*> (b `evalWith` vals)
@@ -140,6 +145,8 @@ subProps n@(Neg p)          = Set.insert n $ subProps p
 subProps e@(Exp p1 op p2)   = Set.insert e $ Set.union (subProps p1) $ subProps p2
 subProps m@(Modal propOp p) = Set.insert m $ subProps p
 subProps w@(Pred p1 p2)     = Set.insert w $ Set.union (subProps p1) $ subProps p2
+subProps ConstFalse         = Set.empty
+subProps ConstTrue          = Set.empty
 
 height :: Prop -> Integer
 height s@(Statement _)    = 1
@@ -147,6 +154,8 @@ height n@(Neg p)          = 1 + height p
 height e@(Exp p1 op p2)   = 1 + max (height p1) (height p2)
 height m@(Modal propOp p) = 1 + height p
 height w@(Pred p1 p2)     = 1 + max (height p1) (height p2)
+height ConstTrue          = 0
+height ConstFalse         = 0
 
 valuations :: [String] -> [Map String Bool]
 valuations vs = [Map.fromList $ zip vs valuation | valuation <- combinationElements $ replicate (length vs) [True, False]]
@@ -172,6 +181,8 @@ getProps = nub . getProps'
           getProps' (Exp a _ b) = getProps' a ++ getProps' b
           getProps' (Modal propOp prop) = getProps' prop
           getProps' (Pred a b) = getProps' a ++ getProps' b
+          getProps' ConstFalse = []
+          getProps' ConstTrue = []
 
 -- I'm sorry.
 showTable :: Prop -> [String]
@@ -268,11 +279,11 @@ topLevelParser = try tryExpr <|>
                  propParser
     where tryExpr = do
             spaces
-            first <- propParser
+            first <- try propParser
             spaces
-            op <- opParser
+            op <- try opParser
             spaces
-            second <- propParser
+            second <- try propParser
             spaces
 
             return $ Exp first op second
@@ -348,15 +359,52 @@ parseProp str =
         Left err -> error $ show err
         Right prop -> prop
 
+data IfExp = If String IfExp IfExp
+           | T
+           | F
+    deriving (Eq, Ord)
+
+instance Show IfExp where
+    show T = "\\true"
+    show F = "\\false"
+    show (If v t e) = "(if $" ++ v ++ "$ then " ++ show t ++ " else " ++ show e ++ ")"
+
+substitute :: (String -> Prop) -> Prop -> Prop
+substitute theta ConstTrue = ConstTrue
+substitute theta ConstFalse = ConstFalse
+substitute theta (Statement s) = theta s
+substitute theta (Neg p) = Neg $ substitute theta p
+substitute theta (Exp a op b) = Exp (substitute theta a) op (substitute theta b)
+substitute theta (Modal op p) = Modal op $ substitute theta p
+substitute theta (Pred a b) = Pred (substitute theta a) (substitute theta b)
+
+shannonExpansion :: Prop -> IfExp
+shannonExpansion ConstTrue = T
+shannonExpansion ConstFalse = F
+shannonExpansion p =
+    case getProps p of
+        [] -> if (p `evalWith` Map.empty == Just True) then T else F
+        v:vs -> If v (go v ConstTrue) (go v ConstFalse)
+    where
+        go v new = shannonExpansion $ substitute (\w -> if w == v then new else Statement w) p
+
+simplifyExpansion :: IfExp -> IfExp
+simplifyExpansion T = T
+simplifyExpansion F = F
+simplifyExpansion (If v t e) =
+    let t' = simplifyExpansion t
+        e' = simplifyExpansion e
+    in if t' == e' then t' else If v t' e'
+
 -- A test prop that is true.
 -- (((P <-> Q) & ((S | T) -> Q)) & ((!P) | ((!T) & R))) -> (T -> U)
 main = do
     args <- getArgs
 
     let useLatex = if not (null args) then head args == "--latex" else False
+    let shannonExpand = if not (null args) then head args == "--shannon-expand" else False
 
     l <- getLine
-
     if length (purgeWhitespace l) == 0 then do
         putStrLn "Please enter some text."
         main
@@ -373,7 +421,9 @@ main = do
                 print $ isEquiv a b
 
             prop ->
-                if useLatex then
+                if shannonExpand then
+                    putStrLn $ show $ shannonExpansion prop
+                else if useLatex then
                     putStrLn $ showLatexTable prop
                 else
                     mapM_ putStrLn $ showTable prop
